@@ -8,12 +8,17 @@ Version 4: Persistent background assistant
   - --cli flag for the original typed-input mode
 """
 
-import sys
 import os
+import sys
 
 # Redirect stdout/stderr to a log file BEFORE importing any third-party libraries
 # This prevents crashes under pythonw where sys.stdout and sys.stderr are invalid
-log_file = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent.log"), "a", encoding="utf-8", buffering=1)
+log_file = open(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent.log"),
+    "a",
+    encoding="utf-8",
+    buffering=1,
+)
 sys.stdout = log_file
 sys.stderr = log_file
 
@@ -22,13 +27,13 @@ import threading
 import tkinter as tk
 import tkinter.simpledialog as sd
 
-from models.llm import LLM
-from models.vision import VisionAnalyzer
-from agent.planner import Planner
 from agent.executor import Executor
 from agent.memory import Memory
-from agent.voice import VoiceIO
 from agent.notifications import notify
+from agent.planner import Planner
+from agent.voice import VoiceIO
+from models.llm import LLM
+from models.vision import VisionAnalyzer
 
 # ── Logging ────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -36,8 +41,8 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[
         logging.FileHandler("agent.log", encoding="utf-8"),
-        logging.StreamHandler(sys.stdout)
-    ]
+        logging.StreamHandler(sys.stdout),
+    ],
 )
 logger = logging.getLogger(__name__)
 
@@ -49,12 +54,12 @@ class DesktopAgent:
     def __init__(self):
         logger.info("Initializing Desktop Agent...")
 
-        self.llm      = LLM()
-        self.vision   = VisionAnalyzer()
-        self.memory   = Memory()
-        self.planner  = Planner(self.llm)
+        self.llm = LLM()
+        self.vision = VisionAnalyzer()
+        self.memory = Memory()
+        self.planner = Planner(self.llm)
         self.executor = Executor(self.vision)
-        self.voice    = VoiceIO()
+        self.voice = VoiceIO()
 
         logger.info("Agent ready!")
 
@@ -63,27 +68,45 @@ class DesktopAgent:
     # ------------------------------------------------------------------
 
     def process_user_input(self, user_input: str) -> str:
-        """Process a user request, execute tools, return response string."""
+        """
+        Process a user request, execute tools, return response string.
+
+        This handles both tool execution and conversational responses,
+        converting ToolResult objects to strings for voice/notification output.
+        """
         logger.info(f"User: {user_input}")
         self.memory.add_interaction("user", user_input)
 
-        decision = self.planner.should_use_tools(user_input)
+        # Extract tools - may raise ValueError if normalization fails
+        # This handles both regex matching AND LLM JSON fallback
+        try:
+            tools_to_execute = self.planner.extract_tools(user_input)
+        except ValueError as e:
+            # Normalization failed (e.g. "wait abc" → can't convert to float)
+            error_msg = f"I couldn't understand that command: {str(e)}"
+            logger.error(f"Tool extraction failed: {e}")
+            self.memory.add_interaction("assistant", error_msg)
+            return error_msg
 
-        if not decision.needs_tools:
+        # If no tools needed, generate conversational response
+        if not tools_to_execute:
             response = self.planner.generate_response(user_input)
             self.memory.add_interaction("assistant", response)
             return response
 
-        tools_to_execute = self.planner.extract_tools(user_input)
         logger.info(f"Tools needed: {tools_to_execute}")
 
         tool_results = []
         for tool_name, tool_args in tools_to_execute:
             logger.info(f"Executing: {tool_name}({tool_args})")
             notify("Desktop Agent", f"Running: {tool_name}…", duration=2)
+
+            # Execute returns ToolResult object
             result = self.executor.execute(tool_name, tool_args)
             tool_results.append((tool_name, result))
-            logger.info(f"Result: {result}")
+
+            # Log structured result
+            logger.info(f"Result: status={result.status}, message={result.result}")
 
         response = self.planner.generate_response_with_context(user_input, tool_results)
         self.memory.add_interaction("assistant", response)
