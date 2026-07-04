@@ -30,7 +30,7 @@ import tkinter.simpledialog as sd
 from agent.executor import Executor
 from agent.memory import Memory
 from agent.notifications import notify
-from agent.planner import Planner
+from agent.planner import Planner, detect_tools
 from agent.voice import VoiceIO
 from models.llm import LLM
 from models.vision import VisionAnalyzer
@@ -76,6 +76,12 @@ class DesktopAgent:
         """
         logger.info(f"User: {user_input}")
         self.memory.add_interaction("user", user_input)
+
+        # The LLM JSON fallback (~5s) only runs when the regex router finds no
+        # match. Show a "Thinking…" toast in that case so voice/tray users see
+        # activity during the slow path; fast regex-matched commands stay quiet.
+        if not detect_tools(user_input):
+            notify("Desktop Agent", "Thinking…", duration=2)
 
         # Extract tools - may raise ValueError if normalization fails
         # This handles both regex matching AND LLM JSON fallback

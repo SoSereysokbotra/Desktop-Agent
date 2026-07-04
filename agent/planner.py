@@ -57,8 +57,12 @@ TOOL_RULES = [
     ),
     # Wait
     (r"\bwait\s+(\d+(?:\.\d+)?)\s*(seconds?)?", "wait", 1),
-    # Click - three patterns for three formats (order matters: specific first)
-    (r"\bclick\s+at\s+(\d+)\s*,\s*(\d+)", "click", "COORDS"),  # "click at 100,200"
+    # Click - patterns for supported formats (order matters: specific first)
+    # Coordinates: the connector word is optional and parens are allowed, so
+    # "click at 100,200", "click on 50,60", "click 50,60" and "click (50, 60)"
+    # all capture x,y. (Previously only "click at X,Y" matched, so "click on
+    # 50,60" fell through to the bare pattern and silently dropped the coords.)
+    (r"\bclick\s+(?:at\s+|on\s+)?\(?\s*(\d+)\s*,\s*(\d+)\s*\)?", "click", "COORDS"),
     (r"\bclick\s+(center|middle)", "click", 1),  # "click center"
     (r"\bclick\b", "click", None),  # "click" alone
 ]
