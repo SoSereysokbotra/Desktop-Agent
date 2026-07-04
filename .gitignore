@@ -15,6 +15,9 @@ test.log
 # Database
 memory.db
 
+# Runtime artifacts
+screenshot.png
+
 # Environment Variables
 .env
 
