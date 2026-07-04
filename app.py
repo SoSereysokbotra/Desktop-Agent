@@ -27,12 +27,14 @@ import threading
 import tkinter as tk
 import tkinter.simpledialog as sd
 
+import requests
+
 from agent.executor import Executor
 from agent.memory import Memory
 from agent.notifications import notify
 from agent.planner import Planner, detect_tools
 from agent.voice import VoiceIO
-from models.llm import LLM
+from models.llm import LLM, OLLAMA_URL, USE_OLLAMA
 from models.vision import VisionAnalyzer
 
 # ── Logging ────────────────────────────────────────────────────────────────
@@ -61,7 +63,39 @@ class DesktopAgent:
         self.executor = Executor(self.vision)
         self.voice = VoiceIO()
 
+        # Warn immediately if the Ollama backend isn't reachable, rather than
+        # letting the user discover it only when their first command fails.
+        self._check_ollama_health()
+
         logger.info("Agent ready!")
+
+    def _check_ollama_health(self):
+        """
+        Ping the Ollama API once at startup. If it's down, log and raise a
+        toast right away so the user knows commands will fail until the
+        server is running. No-op when the transformers backend is in use.
+        """
+        if not USE_OLLAMA:
+            return
+
+        # OLLAMA_URL is the /api/generate endpoint; derive the /api/tags probe.
+        base = OLLAMA_URL.rsplit("/api/", 1)[0]
+        tags_url = f"{base}/api/tags"
+        try:
+            resp = requests.get(tags_url, timeout=3)
+            resp.raise_for_status()
+            logger.info("Ollama health check OK at startup")
+        except Exception as e:
+            logger.error(
+                f"Ollama health check FAILED at startup "
+                f"[{type(e).__name__}]: {e}"
+            )
+            notify(
+                "Desktop Agent",
+                "Ollama server not reachable - is it running? "
+                "Commands will fail until it starts.",
+                duration=6,
+            )
 
     # ------------------------------------------------------------------
     # Core pipeline (unchanged from v3)

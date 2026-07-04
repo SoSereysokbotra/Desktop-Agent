@@ -16,6 +16,7 @@ planner.py / executor.py / app.py need no changes.
 """
 
 import logging
+import time
 
 import requests
 
@@ -182,27 +183,69 @@ The user asked: "{user_message}"{context}
         return self._generate_transformers(prompt, max_tokens, temperature)
 
     def _generate_ollama(self, prompt, max_tokens, temperature):
-        """Generate via Ollama's /api/generate HTTP endpoint (stream=false)."""
-        try:
-            payload = {
-                "model": OLLAMA_MODEL,
-                "prompt": prompt,
-                "stream": False,
-                "options": {
-                    "num_predict": max_tokens,  # Ollama's name for max new tokens
-                    "temperature": temperature,
-                    "top_p": 0.9,
-                    "top_k": 50,
-                },
-            }
-            resp = requests.post(OLLAMA_URL, json=payload, timeout=OLLAMA_TIMEOUT)
-            resp.raise_for_status()
-            data = resp.json()
-            return data["response"].strip()
+        """
+        Generate via Ollama's /api/generate HTTP endpoint (stream=false).
 
-        except Exception as e:
-            logger.error(f"Generation error: {e}")
-            return "Error generating response"
+        Resilience: a ConnectionError usually means the Ollama server is not
+        listening yet (e.g. still starting up), so we retry with a short
+        backoff before giving up. After the retries are exhausted we return a
+        SPECIFIC "server not reachable" message (distinct from the generic
+        error) so the cause is obvious to the user. Non-connection errors are
+        not retried - they are logged with a full traceback and return the
+        generic string.
+        """
+        payload = {
+            "model": OLLAMA_MODEL,
+            "prompt": prompt,
+            "stream": False,
+            "options": {
+                "num_predict": max_tokens,  # Ollama's name for max new tokens
+                "temperature": temperature,
+                "top_p": 0.9,
+                "top_k": 50,
+            },
+        }
+
+        # Backoff schedule for retries AFTER the initial attempt (seconds).
+        RETRY_BACKOFFS = [1, 2]
+        total_attempts = len(RETRY_BACKOFFS) + 1  # initial + retries
+
+        for attempt in range(total_attempts):
+            try:
+                resp = requests.post(
+                    OLLAMA_URL, json=payload, timeout=OLLAMA_TIMEOUT
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                return data["response"].strip()
+
+            except requests.exceptions.ConnectionError as e:
+                # Server not reachable - retry unless we've used our attempts.
+                if attempt < len(RETRY_BACKOFFS):
+                    wait = RETRY_BACKOFFS[attempt]
+                    logger.warning(
+                        f"Ollama connection refused "
+                        f"(attempt {attempt + 1}/{total_attempts}); "
+                        f"retrying in {wait}s [{type(e).__name__}]"
+                    )
+                    time.sleep(wait)
+                    continue
+                # Retries exhausted - report the specific, actionable cause.
+                logger.error(
+                    f"Ollama unreachable after {total_attempts} attempts "
+                    f"[{type(e).__name__}]: {e}",
+                    exc_info=True,
+                )
+                return "Ollama server not reachable - is it running?"
+
+            except Exception as e:
+                # Non-connection failure (HTTP error, bad JSON, etc.) - do not
+                # retry; log the real exception type and full traceback.
+                logger.error(
+                    f"Ollama generation error [{type(e).__name__}]: {e}",
+                    exc_info=True,
+                )
+                return "Error generating response"
 
     def _generate_transformers(self, prompt, max_tokens, temperature):
         """
