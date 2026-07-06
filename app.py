@@ -23,7 +23,6 @@ sys.stdout = log_file
 sys.stderr = log_file
 
 import logging
-import re
 import threading
 
 import requests
@@ -32,7 +31,12 @@ from agent.executor import Executor
 from agent.memory import Memory
 from agent.notifications import notify
 from agent.orchestrator import DONE_TOOL, PARSE_ERROR_MARKER, ReActOrchestrator
-from agent.planner import Planner, detect_tools
+from agent.planner import (
+    Planner,
+    count_distinct_actions,
+    detect_tools,
+    has_word_marker,
+)
 from agent.tools import ToolResult
 from agent.voice import VoiceIO
 from models.llm import LLM, OLLAMA_URL, USE_OLLAMA
@@ -51,14 +55,6 @@ logger = logging.getLogger(__name__)
 
 # Guard so only one command is processed at a time
 _processing_lock = threading.Lock()
-
-# Connective markers that suggest a multi-step goal. Only consulted for
-# confirmed ACTION inputs (conversation is already filtered to "none" by the
-# classifier before this runs), so a false positive merely sends a single
-# action through the orchestrator - never misroutes chit-chat into execution.
-_MULTISTEP_MARKERS = re.compile(
-    r"\b(and|then|after|afterwards|next|also|followed by)\b|[,;]", re.IGNORECASE
-)
 
 
 class GatedExecutor:
@@ -202,17 +198,44 @@ class DesktopAgent:
             self.memory.add_interaction("assistant", response)
             return response
 
+        # COMPOUND-COMMAND DETECTION -----------------------------------------
+        # A single command can regex-match ONE tool yet contain multiple
+        # distinct intents. e.g. "open notepad and take a screenshot" regex-
+        # matches only take_screenshot (rule order), so the single-shot path
+        # would silently DROP "open notepad" - a partial-completion bug in the
+        # same danger class as the earlier hallucination bug.
+        #
+        # Detect it with TWO independent signals that must BOTH agree:
+        #   (1) >=2 DISTINCT tool actions are detectable in the text, AND
+        #   (2) a WORD connective (and/then/after/next/also/followed by) is
+        #       present (never commas/semicolons - those appear in coordinates
+        #       like "100,200" and in typed content).
+        # Requiring BOTH keeps a literal action word inside typed content
+        # ("type click here", "type open the door") single-shot: two actions
+        # are detected but there is no connective, so is_compound stays False.
+        #
+        # This OVERRIDES the regex short-circuit and is deliberately NOT gated
+        # on from_fallback - a clean regex hit no longer masks a compound
+        # command. (Supersedes the weaker from_fallback-gated marker heuristic
+        # from commit 440f9f8.)
+        distinct_actions = count_distinct_actions(user_input)
+        word_marker = has_word_marker(user_input)
+        is_compound = distinct_actions >= 2 and word_marker
+        logger.info(
+            f"[decision] compound_check distinct_actions={distinct_actions} "
+            f"word_marker={word_marker} is_compound={is_compound}"
+        )
+
         # Route genuine multi-step goals to the ReAct orchestrator, which
         # OBSERVES each result and adapts/self-corrects between steps, instead
-        # of blindly running a guessed batch. Conversation is already filtered
-        # out above. The classifier reliably UNDER-counts (it returns the first
-        # action, rarely an array), so multi-step is detected by connective
-        # markers on the input OR an explicit >=2 array if one is produced.
-        multistep = self._looks_multistep(user_input)
-        if from_fallback and (multistep or len(tools_to_execute) >= 2):
+        # of blindly running a guessed batch. Two triggers:
+        #   - is_compound: a compound command (works even on a regex hit), OR
+        #   - the LLM fallback classifier explicitly returned a >=2 array.
+        if is_compound or (from_fallback and len(tools_to_execute) >= 2):
             logger.info(
                 f"[decision] multi-step goal -> ReAct orchestrator "
-                f"(markers={multistep}, classifier_tools={len(tools_to_execute)})"
+                f"(is_compound={is_compound}, from_fallback={from_fallback}, "
+                f"classifier_tools={len(tools_to_execute)})"
             )
             return self._run_orchestrated(user_input)
 
@@ -249,16 +272,6 @@ class DesktopAgent:
         response = self.planner.generate_response_with_context(user_input, tool_results)
         self.memory.add_interaction("assistant", response)
         return response
-
-    @staticmethod
-    def _looks_multistep(text: str) -> bool:
-        """
-        True if the input has connective markers suggesting multiple steps.
-        Only consulted AFTER conversation is filtered out, so a false positive
-        merely routes a single action through the (correct) orchestrator - it
-        cannot misroute conversational input into task execution.
-        """
-        return bool(_MULTISTEP_MARKERS.search(text))
 
     def _run_orchestrated(self, user_input: str) -> str:
         """

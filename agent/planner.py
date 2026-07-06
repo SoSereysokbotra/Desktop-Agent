@@ -121,6 +121,66 @@ def needs_tools(user_input: str) -> bool:
     return len(detect_tools(user_input)) > 0
 
 
+def count_distinct_actions(user_input: str) -> int:
+    """
+    Count how many DISTINCT tool actions are detectable in the text.
+
+    Unlike detect_tools() - which stops at the FIRST match to keep single-shot
+    routing exclusive - this scans ALL rules and counts distinct tool NAMES.
+    It answers "how many separate intents does this command contain?", the
+    signal used (together with has_word_marker) to detect compound commands
+    that a single regex short-circuit would silently reduce to one action.
+
+    Counting distinct tool NAMES (not raw pattern hits) means the several
+    rules that map to the same tool - e.g. the coordinate, center, and bare
+    'click' rules - collapse to a single action. So "click at 100,200" counts
+    as 1 (not 3), which is what keeps the comma in a coordinate from ever
+    looking like a second intent.
+
+    Examples:
+        count_distinct_actions("open notepad and take a screenshot") -> 2
+        count_distinct_actions("click at 100,200")                    -> 1
+        count_distinct_actions("type click here")                     -> 2
+        count_distinct_actions("hello")                               -> 0
+    """
+    text = user_input.strip()
+    tools_seen = set()
+    for pattern, tool_name, _arg_capture in TOOL_RULES:
+        if re.search(pattern, text, re.IGNORECASE):
+            tools_seen.add(tool_name)
+    return len(tools_seen)
+
+
+# Word connectives that join separate intents in a compound command.
+# WORD BOUNDARIES ONLY - deliberately EXCLUDES commas and semicolons, which
+# occur inside coordinates ("100,200") and inside typed content, and would
+# otherwise cause false compound detection. "afterwards" is listed before
+# "after" so the \b does not clip it to a bare "after" match.
+_WORD_CONNECTIVES = re.compile(
+    r"\b(and|then|afterwards|after|next|also|followed\s+by)\b", re.IGNORECASE
+)
+
+
+def has_word_marker(user_input: str) -> bool:
+    """
+    True if the input contains a WORD connective (and/then/after/afterwards/
+    next/also/followed by) that joins clauses. Commas and semicolons are NOT
+    markers - see _WORD_CONNECTIVES for why.
+
+    This is one of the two signals for compound-command routing; it MUST be
+    combined with count_distinct_actions() >= 2 (both must be true). Requiring
+    both is what keeps a literal action word inside typed content - e.g.
+    "type click here" (no connective) - from being forced to multi-step.
+
+    Examples:
+        has_word_marker("open notepad and take a screenshot") -> True
+        has_word_marker("open chrome then type hello")        -> True
+        has_word_marker("click at 100,200")                   -> False
+        has_word_marker("type click here")                    -> False
+    """
+    return bool(_WORD_CONNECTIVES.search(user_input))
+
+
 class Planner:
     def __init__(self, llm):
         self.llm = llm
