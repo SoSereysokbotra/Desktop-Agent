@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 class VoiceIO:
     def __init__(self):
-        self._tts_engine = None
+        self._tts_ok = False
         self._tts_lock = threading.Lock()
         self._sr_available = False
         self._mic_available = False
@@ -25,15 +25,19 @@ class VoiceIO:
     # ------------------------------------------------------------------
 
     def _init_tts(self):
+        # Only PROBE that pyttsx3 works, then release the engine. We do NOT
+        # keep a persistent engine: pyttsx3/SAPI5 silently no-ops on the 2nd
+        # runAndWait() of a reused engine (and no-ops entirely when used from a
+        # worker thread it wasn't created on). So speak() builds a FRESH engine
+        # on the calling thread for every utterance. See _reproduce evidence.
         try:
             import pyttsx3
             engine = pyttsx3.init()
-            # Slightly slower rate – sounds more natural
-            engine.setProperty("rate", 160)
-            engine.setProperty("volume", 1.0)
-            self._tts_engine = engine
-            logger.info("TTS engine ready")
+            del engine  # release; WeakValueDictionary cache lets it be recreated
+            self._tts_ok = True
+            logger.info("TTS engine ready (fresh instance created per utterance)")
         except Exception as e:
+            self._tts_ok = False
             logger.warning(f"TTS unavailable: {e}")
 
     def _init_sr(self):
@@ -63,17 +67,60 @@ class VoiceIO:
     # ------------------------------------------------------------------
 
     def speak(self, text: str):
-        """Convert text to speech (blocking)."""
-        if not self._tts_engine:
+        """
+        Convert text to speech (blocking).
+
+        A FRESH pyttsx3 engine is created for each call, on the calling thread,
+        to avoid the SAPI5 "second runAndWait silently no-ops" bug. Real logging
+        surrounds the call so a silent no-op (runAndWait returning near-instantly
+        without speaking) is visible in the log instead of vanishing.
+        """
+        if not self._tts_ok:
             print(f"[Agent]: {text}")
             return
-        try:
-            with self._tts_lock:
-                self._tts_engine.say(text)
-                self._tts_engine.runAndWait()
-        except Exception as e:
-            logger.error(f"TTS error: {e}")
-            print(f"[Agent]: {text}")
+
+        import time as _time
+
+        engine = None
+        with self._tts_lock:
+            try:
+                import pyttsx3
+
+                thread_name = threading.current_thread().name
+                logger.info(
+                    f"TTS: speaking {len(text)} chars on thread '{thread_name}'"
+                )
+                engine = pyttsx3.init()
+                engine.setProperty("rate", 160)
+                engine.setProperty("volume", 1.0)
+
+                t0 = _time.perf_counter()
+                engine.say(text)
+                engine.runAndWait()
+                elapsed = _time.perf_counter() - t0
+
+                # A real utterance blocks in runAndWait; a silent no-op returns
+                # almost instantly. Surface that instead of failing silently.
+                if elapsed < 0.15:
+                    logger.warning(
+                        f"TTS: runAndWait returned in {elapsed:.3f}s - likely a "
+                        f"SILENT no-op (nothing spoken). text={text[:60]!r}"
+                    )
+                else:
+                    logger.info(f"TTS: runAndWait completed in {elapsed:.2f}s")
+
+            except Exception as e:
+                logger.error(f"TTS error [{type(e).__name__}]: {e}", exc_info=True)
+                print(f"[Agent]: {text}")
+            finally:
+                # Release the engine so pyttsx3's cache recreates a fresh one
+                # next time (prevents the reused-engine no-op).
+                try:
+                    if engine is not None:
+                        engine.stop()
+                except Exception:
+                    pass
+                engine = None
 
     def listen(self, timeout: int = 8, phrase_limit: int = 15) -> str | None:
         """
