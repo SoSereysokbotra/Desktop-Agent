@@ -16,7 +16,9 @@ test.log
 memory.db
 
 # Runtime artifacts
-screenshot.png
+# Glob (not exact names) so app-prefixed screenshots like notepad_screenshot.png
+# are caught too, not just the bare screenshot.png.
+*screenshot*.png
 computer_definition.png
 history_of_computing.png
 
