@@ -31,6 +31,21 @@ OLLAMA_URL = "http://localhost:11434/api/generate"
 OLLAMA_MODEL = "qwen2.5:7b"          # instruct-tuned by default in Ollama
 OLLAMA_TIMEOUT = 120                 # seconds; a cold 7B load can take ~10s+
 
+# Persona for user-facing NATURAL-LANGUAGE responses only (never used in the
+# JSON tool-selection prompts, which must stay strictly JSON-only).
+SYSTEM_PERSONA = (
+    "You are System, a professional and composed AI assistant with a refined, "
+    "articulate manner - in the vein of a trusted personal assistant to a "
+    "high-profile client. You are calm, precise, courteous, and quietly "
+    "confident; never casual, slangy, or verbose. Always stay in character as "
+    "System. If the user asks your name, tell them your name is System. Address "
+    "the user respectfully and keep replies concise and genuinely helpful. When "
+    "tool results are provided, explain what happened clearly and professionally. "
+    "Address the user as 'sir'. You may allow yourself occasional understated, "
+    "dry wit, but never at the expense of clarity or helpfulness - your primary "
+    "duty is being genuinely useful."
+)
+
 # Transformers settings (used when USE_OLLAMA is False)
 TRANSFORMERS_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 
@@ -156,7 +171,9 @@ If you can answer directly, just respond naturally."""
         if tool_results:
             context = f"\n\nThe requested tool has already been executed.\n\nTool Results:\n{tool_results}\n"
 
-        system_prompt = "You are a helpful AI desktop assistant. Respond naturally to the user explaining what happened based on the tool results."
+        # Persona applies to ALL user-facing natural-language replies (both the
+        # conversational and post-tool cases flow through here).
+        system_prompt = SYSTEM_PERSONA
 
         return f"""<|im_start|>system
 {system_prompt}
