@@ -55,8 +55,8 @@ TOOL_RULES = [
         "type_text",
         1,
     ),
-    # Wait
-    (r"\bwait\s+(\d+(?:\.\d+)?)\s*(seconds?)?", "wait", 1),
+    # Wait ("wait 5", "wait for 3 seconds")
+    (r"\bwait\s+(?:for\s+)?(\d+(?:\.\d+)?)\s*(seconds?)?", "wait", 1),
     # Click - patterns for supported formats (order matters: specific first)
     # Coordinates: the connector word is optional and parens are allowed, so
     # "click at 100,200", "click on 50,60", "click 50,60" and "click (50, 60)"
@@ -194,21 +194,41 @@ class Planner:
         # Get available tools from registry for LLM context
         tool_schemas = ToolRegistry.get_json_schemas()
 
-        prompt = f"""You are a desktop automation assistant. The user said: "{user_input}"
+        prompt = f"""You decide whether a user's message needs a DESKTOP ACTION \
+(a tool) or is just CONVERSATION that should be answered with words.
 
-Available tools (JSON schemas):
+The user said: "{user_input}"
+
+Available tools (use one ONLY if the user clearly asks for that desktop action):
 {json.dumps(tool_schemas, indent=2)}
 
-Output ONLY valid JSON in this exact format (no other text):
-{{"tool": "tool_name", "args": {{"key": "value"}}}}
+Respond with ONLY valid JSON. Choose exactly one of:
 
-If multiple tools are needed, output a JSON array:
-[
-  {{"tool": "tool_name1", "args": {{}}}},
-  {{"tool": "tool_name2", "args": {{}}}}
-]
+1. CONVERSATION - the user is greeting, chatting, thanking, or asking a question
+   that can be answered with words (this is the DEFAULT). Respond exactly:
+   {{"tool": "none"}}
 
-JSON output:"""
+2. DESKTOP ACTION - the user EXPLICITLY asks to open/type/click/wait/screenshot.
+   Respond with the tool call (or a JSON array for multiple actions):
+   {{"tool": "tool_name", "args": {{"key": "value"}}}}
+
+Hard rules:
+- Default to {{"tool": "none"}} unless the user clearly requests a desktop action.
+- Greetings, "how are you", "what can you do", "tell me / say something", thanks,
+  and general questions are CONVERSATION -> {{"tool": "none"}}.
+- NEVER use type_text to "speak" or reply to the user - that types into their
+  active window. Only use type_text when the user explicitly says to type text.
+- Never invent an action the user did not ask for.
+
+Examples:
+  "hey can you say something to me" -> {{"tool": "none"}}
+  "how are you today"              -> {{"tool": "none"}}
+  "what can you do"                -> {{"tool": "none"}}
+  "thanks that helped"             -> {{"tool": "none"}}
+  "open notepad"                   -> {{"tool": "open_app", "args": {{"app_name": "notepad"}}}}
+  "type hello world"              -> {{"tool": "type_text", "args": {{"text": "hello world"}}}}
+
+JSON:"""
 
         response = self.llm.generate(prompt, max_tokens=200)
 
@@ -216,11 +236,22 @@ JSON output:"""
         try:
             parsed = json.loads(response.strip())
 
-            # Normalize to list format
+            # A "none" tool (or empty) means: no desktop action, converse instead.
+            def _keep(item):
+                return isinstance(item, dict) and item.get("tool") not in (
+                    None, "none", "None", "",
+                )
+
             if isinstance(parsed, dict):
-                return [(parsed["tool"], parsed.get("args", {}))]
+                if not _keep(parsed):
+                    return []
+                return [(parsed["tool"], parsed.get("args", {}) or {})]
             elif isinstance(parsed, list):
-                return [(item["tool"], item.get("args", {})) for item in parsed]
+                return [
+                    (item["tool"], item.get("args", {}) or {})
+                    for item in parsed
+                    if _keep(item)
+                ]
             else:
                 logger.error(f"LLM returned unexpected JSON structure: {parsed}")
                 return []
