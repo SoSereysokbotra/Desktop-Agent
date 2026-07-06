@@ -363,7 +363,7 @@ class DesktopAgent:
 
         notify(
             "Desktop Agent",
-            "Agent is running! Press Ctrl+Alt+A to speak a command.",
+            "Agent is running! Press Ctrl+Shift+A to speak a command.",
         )
 
         try:

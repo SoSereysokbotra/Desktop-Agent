@@ -1,5 +1,5 @@
 """
-Hotkey listener - Global Ctrl+Alt+A hotkey using pynput.
+Hotkey listener - Global Ctrl+Shift+A hotkey using pynput.
 Runs in a daemon thread so it doesn't block the main tray thread.
 """
 
@@ -8,8 +8,9 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# The hotkey combination (pynput format)
-HOTKEY = "<ctrl>+<alt>+a"
+# The hotkey combination (pynput format). Matches the tray menu label and the
+# startup notification in app.py.
+HOTKEY = "<ctrl>+<shift>+a"
 
 
 class HotkeyListener:
