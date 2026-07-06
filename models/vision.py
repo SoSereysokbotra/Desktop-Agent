@@ -1,17 +1,46 @@
 """
 Vision capabilities - screenshot and image understanding
 Uses a lightweight vision model from HuggingFace
+
+Grounded OCR (Phase 3): extract_text_boxes() / find_text() locate on-screen
+text and its pixel coordinates via Tesseract. These are ADDITIVE - the BLIP
+caption path above is untouched.
 """
 
+import difflib
 import io
 import logging
+import os
 
 import pyautogui
+import pytesseract
 import torch
 from PIL import Image
 from transformers import pipeline
 
 logger = logging.getLogger(__name__)
+
+
+def _configure_tesseract():
+    """
+    Point pytesseract at the Tesseract binary. winget installs it to a known
+    location that is NOT always on the current process PATH, so probe a few
+    candidates explicitly and fall back to whatever is on PATH.
+    """
+    candidates = [
+        r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+        r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+        os.path.expanduser(r"~\AppData\Local\Programs\Tesseract-OCR\tesseract.exe"),
+    ]
+    for path in candidates:
+        if path and os.path.isfile(path):
+            pytesseract.pytesseract.tesseract_cmd = path
+            logger.info(f"Tesseract binary: {path}")
+            return
+    logger.info("Tesseract binary not found at known paths; relying on PATH")
+
+
+_configure_tesseract()
 
 
 class VisionAnalyzer:
@@ -121,3 +150,146 @@ class VisionAnalyzer:
         # Future: Use object detection or layout analysis
         # For now, just analyze what's there
         return self.analyze_current_screen()
+
+    # ------------------------------------------------------------------
+    # Grounded OCR (Phase 3) - locate on-screen text + pixel coordinates
+    # ------------------------------------------------------------------
+
+    def _resolve_image(self, image):
+        """image: None -> live screenshot; str -> open file; PIL Image -> as-is."""
+        if image is None:
+            return self.take_screenshot()
+        if isinstance(image, str):
+            return Image.open(image)
+        return image
+
+    def extract_text_boxes(self, image=None, min_conf=50, upscale=1.0):
+        """
+        OCR the image and return each confident text token with its bounding
+        box AND center, in the ORIGINAL image's pixel coordinates.
+
+        Args:
+            image: None (live screenshot), a file path, or a PIL Image.
+            min_conf: drop tokens below this Tesseract confidence (0-100).
+            upscale: pre-OCR magnification for small UI text (e.g. 2.0). Boxes
+                are divided back by this factor so returned coordinates are
+                always in the ORIGINAL image space - never the upscaled space.
+
+        Returns:
+            List of dicts: {text, conf, left, top, width, height, cx, cy}.
+            cx,cy is the box center - the point a grounded click would target.
+            Empty list on OCR failure (never raises).
+
+        NOTE ON COORDINATES: coordinates are in screenshot-PIXEL space. Whether
+        that equals pyautogui click space at this display scaling is verified
+        empirically by the Phase 3 DPI test - do not assume 1:1 without it.
+        """
+        try:
+            img = self._resolve_image(image)
+            if img is None:
+                logger.error("extract_text_boxes: no image to OCR")
+                return []
+
+            ocr_img = img
+            if upscale and upscale != 1.0:
+                ocr_img = img.resize(
+                    (int(img.width * upscale), int(img.height * upscale)),
+                    Image.LANCZOS,
+                )
+
+            data = pytesseract.image_to_data(
+                ocr_img, output_type=pytesseract.Output.DICT
+            )
+
+            boxes = []
+            n = len(data["text"])
+            for i in range(n):
+                text = data["text"][i].strip()
+                if not text:
+                    continue
+                try:
+                    conf = float(data["conf"][i])
+                except (ValueError, TypeError):
+                    conf = -1.0
+                if conf < min_conf:
+                    continue
+
+                # Map back from upscaled space to original image pixels.
+                left = data["left"][i] / upscale
+                top = data["top"][i] / upscale
+                width = data["width"][i] / upscale
+                height = data["height"][i] / upscale
+
+                boxes.append(
+                    {
+                        "text": text,
+                        "conf": conf,
+                        "left": int(round(left)),
+                        "top": int(round(top)),
+                        "width": int(round(width)),
+                        "height": int(round(height)),
+                        "cx": int(round(left + width / 2)),
+                        "cy": int(round(top + height / 2)),
+                    }
+                )
+
+            logger.info(f"extract_text_boxes: {len(boxes)} tokens (min_conf={min_conf})")
+            return boxes
+
+        except Exception as e:
+            logger.error(f"extract_text_boxes failed: {e}", exc_info=True)
+            return []
+
+    def find_text(self, query, image=None, min_conf=50, upscale=1.0, min_score=0.6):
+        """
+        Locate the on-screen text token best matching `query` (fuzzy).
+
+        Matching: case-insensitive. A token that CONTAINS the query (or vice
+        versa) scores 1.0; otherwise a difflib similarity ratio is used. The
+        best token at or above min_score wins.
+
+        Args:
+            query: text to look for (e.g. "Submit", "File").
+            image/min_conf/upscale: passed to extract_text_boxes().
+            min_score: minimum match score in [0,1] to accept.
+
+        Returns:
+            {text, score, cx, cy, box} for the best match, or None if nothing
+            clears min_score. cx,cy is the click target (original-image pixels).
+        """
+        q = (query or "").strip().lower()
+        if not q:
+            return None
+
+        boxes = self.extract_text_boxes(image, min_conf=min_conf, upscale=upscale)
+
+        best = None
+        best_score = 0.0
+        for box in boxes:
+            token = box["text"].lower()
+            if q in token or token in q:
+                score = 1.0
+            else:
+                score = difflib.SequenceMatcher(None, q, token).ratio()
+            if score > best_score:
+                best_score = score
+                best = box
+
+        if best is None or best_score < min_score:
+            logger.info(
+                f"find_text({query!r}): no match >= {min_score} "
+                f"(best={best_score:.2f})"
+            )
+            return None
+
+        logger.info(
+            f"find_text({query!r}): matched {best['text']!r} "
+            f"score={best_score:.2f} at ({best['cx']},{best['cy']})"
+        )
+        return {
+            "text": best["text"],
+            "score": round(best_score, 3),
+            "cx": best["cx"],
+            "cy": best["cy"],
+            "box": best,
+        }
