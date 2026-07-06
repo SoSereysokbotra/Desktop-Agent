@@ -184,6 +184,20 @@ class ReActOrchestrator:
                 f"[{task_id}] step {step}: OBSERVE [{result.status}] {observation}"
             )
 
+            # ---- User-denied confirmation aborts the whole task ----
+            # If the executor reports the user refused a required action, stop
+            # immediately rather than retrying it until max_steps. (Terminal
+            # condition only - the Think/Act/Observe logic above is unchanged.)
+            if result.data.get("user_denied"):
+                logger.warning(
+                    f"[{task_id}] step {step}: user denied '{tool}' - aborting task"
+                )
+                return self._summary(
+                    task_id, goal, "aborted", False, actions_taken,
+                    step, start, trace,
+                    reason=f"User denied action '{tool}'; task stopped",
+                )
+
         # Fell out of the loop without a "done" -> hit the cap.
         return self._summary(
             task_id, goal, "incomplete", False, actions_taken,

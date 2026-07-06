@@ -23,6 +23,7 @@ sys.stdout = log_file
 sys.stderr = log_file
 
 import logging
+import re
 import threading
 
 import requests
@@ -30,6 +31,7 @@ import requests
 from agent.executor import Executor
 from agent.memory import Memory
 from agent.notifications import notify
+from agent.orchestrator import DONE_TOOL, PARSE_ERROR_MARKER, ReActOrchestrator
 from agent.planner import Planner, detect_tools
 from agent.tools import ToolResult
 from agent.voice import VoiceIO
@@ -49,6 +51,60 @@ logger = logging.getLogger(__name__)
 
 # Guard so only one command is processed at a time
 _processing_lock = threading.Lock()
+
+# Connective markers that suggest a multi-step goal. Only consulted for
+# confirmed ACTION inputs (conversation is already filtered to "none" by the
+# classifier before this runs), so a false positive merely sends a single
+# action through the orchestrator - never misroutes chit-chat into execution.
+_MULTISTEP_MARKERS = re.compile(
+    r"\b(and|then|after|afterwards|next|also|followed by)\b|[,;]", re.IGNORECASE
+)
+
+
+class GatedExecutor:
+    """
+    Executor wrapper that routes the orchestrator's Act step through the SAME
+    safety confirmation gate as the single-shot fallback path, and fires a
+    per-action "Running: tool" toast for UI consistency.
+
+    Every orchestrator action is LLM-guessed (there is no regex "trusted" path
+    inside the loop), so every impactful action is gated. Because the
+    orchestrator can only execute THROUGH this wrapper, the gate is
+    architecturally unbypassable via the orchestrator - it is not merely
+    applied by convention in the caller.
+    """
+
+    def __init__(self, real_executor, confirm_fn, describe_fn, impactful_tools,
+                 on_run=None):
+        self._exec = real_executor
+        self._confirm = confirm_fn
+        self._describe = describe_fn
+        self._impactful = impactful_tools
+        self._on_run = on_run
+
+    def execute(self, tool_name, args=None):
+        if self._on_run:
+            self._on_run(tool_name)
+        if tool_name in self._impactful:
+            logger.warning(
+                f"[safety] orchestrator impactful action needs confirmation: "
+                f"{tool_name}({args})"
+            )
+            if not self._confirm(self._describe(tool_name, args or {})):
+                logger.warning(
+                    f"[safety] DENIED (orchestrator step, not executed): "
+                    f"{tool_name}({args})"
+                )
+                # user_denied=True tells the orchestrator to ABORT the whole
+                # task immediately instead of retrying the denied action.
+                return ToolResult.error(
+                    "Action not confirmed by user - task stopped",
+                    data={"user_denied": True, "tool": tool_name, "args": args},
+                )
+            logger.info(
+                f"[safety] CONFIRMED by user (orchestrator step): {tool_name}"
+            )
+        return self._exec.execute(tool_name, args)
 
 
 class DesktopAgent:
@@ -146,6 +202,20 @@ class DesktopAgent:
             self.memory.add_interaction("assistant", response)
             return response
 
+        # Route genuine multi-step goals to the ReAct orchestrator, which
+        # OBSERVES each result and adapts/self-corrects between steps, instead
+        # of blindly running a guessed batch. Conversation is already filtered
+        # out above. The classifier reliably UNDER-counts (it returns the first
+        # action, rarely an array), so multi-step is detected by connective
+        # markers on the input OR an explicit >=2 array if one is produced.
+        multistep = self._looks_multistep(user_input)
+        if from_fallback and (multistep or len(tools_to_execute) >= 2):
+            logger.info(
+                f"[decision] multi-step goal -> ReAct orchestrator "
+                f"(markers={multistep}, classifier_tools={len(tools_to_execute)})"
+            )
+            return self._run_orchestrated(user_input)
+
         tool_results = []
         for tool_name, tool_args in tools_to_execute:
             # SAFETY GATE: an impactful action (types/opens into the focused
@@ -176,6 +246,55 @@ class DesktopAgent:
             tool_results.append((tool_name, result))
             logger.info(f"Result: status={result.status}, message={result.result}")
 
+        response = self.planner.generate_response_with_context(user_input, tool_results)
+        self.memory.add_interaction("assistant", response)
+        return response
+
+    @staticmethod
+    def _looks_multistep(text: str) -> bool:
+        """
+        True if the input has connective markers suggesting multiple steps.
+        Only consulted AFTER conversation is filtered out, so a false positive
+        merely routes a single action through the (correct) orchestrator - it
+        cannot misroute conversational input into task execution.
+        """
+        return bool(_MULTISTEP_MARKERS.search(text))
+
+    def _run_orchestrated(self, user_input: str) -> str:
+        """
+        Run a multi-step goal through the ReAct orchestrator (Think->Act->
+        Observe). Built PER COMMAND (fresh task_id, no stale bridge/state).
+
+        Actions execute through a GatedExecutor, so the SAME safety gate as the
+        single-shot path applies to every impactful step - the orchestrator has
+        no way around it. The "Thinking…" toast already fired in
+        process_user_input; per-action "Running: tool" toasts come from the
+        GatedExecutor. task_steps logging happens inside the orchestrator via
+        the real self.memory.
+        """
+        gated = GatedExecutor(
+            self.executor,
+            self._confirm_action,
+            self._describe_action,
+            self.IMPACTFUL_TOOLS,
+            on_run=lambda t: notify("Desktop Agent", f"Running: {t}…", duration=2),
+        )
+        # Per-command construction (max_steps + loop logic unchanged from Phase 2).
+        orchestrator = ReActOrchestrator(self.llm, gated, self.memory)
+        summary = orchestrator.run(user_input)
+        logger.info(
+            f"[decision] orchestrator done: status={summary['status']} "
+            f"actions={summary['actions_taken']} iterations={summary['iterations']} "
+            f"elapsed={summary['elapsed_sec']}s reason={summary['reason']!r}"
+        )
+
+        # Summarize the run for the user in the System persona, feeding the real
+        # per-step observations as context (skipping the done/parse-error markers).
+        tool_results = [
+            (e["tool"], f"[{e['status']}] {e['observation']}")
+            for e in summary["trace"]
+            if e["tool"] not in (DONE_TOOL, PARSE_ERROR_MARKER)
+        ]
         response = self.planner.generate_response_with_context(user_input, tool_results)
         self.memory.add_interaction("assistant", response)
         return response
