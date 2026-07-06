@@ -17,6 +17,8 @@ memory.db
 
 # Runtime artifacts
 screenshot.png
+computer_definition.png
+history_of_computing.png
 
 # Environment Variables
 .env
