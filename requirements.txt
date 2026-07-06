@@ -11,3 +11,5 @@ SpeechRecognition
 pyttsx3
 pystray
 pydantic>=2.0.0
+PySide6
+requests
