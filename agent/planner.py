@@ -64,6 +64,19 @@ TOOL_RULES = [
     # 50,60" fell through to the bare pattern and silently dropped the coords.)
     (r"\bclick\s+(?:at\s+|on\s+)?\(?\s*(\d+)\s*,\s*(\d+)\s*\)?", "click", "COORDS"),
     (r"\bclick\s+(center|middle)", "click", 1),  # "click center"
+    # Grounded text-click: "click [on] [the] <text> [button/icon/...]". Placed
+    # AFTER coordinate/center rules (those win) and BEFORE bare click. The target
+    # must START WITH A LETTER, so pure coordinates never match here. A leading
+    # article and a trailing UI noun are stripped, leaving the text for OCR:
+    #   "click the Save button" -> query "Save"; "click on File" -> query "File".
+    # Bare "click" (no target) has no letter group -> falls through to bare click.
+    (
+        r"\bclick\s+(?:on\s+|at\s+)?(?:the\s+|a\s+|an\s+)?"
+        r"([a-zA-Z][\w\s'-]*?)"
+        r"(?:\s+(?:button|icon|link|tab|menu|option|field|box))?\s*$",
+        "click_text",
+        1,
+    ),
     (r"\bclick\b", "click", None),  # "click" alone
 ]
 

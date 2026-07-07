@@ -241,14 +241,21 @@ class DesktopAgent:
 
         tool_results = []
         for tool_name, tool_args in tools_to_execute:
-            # SAFETY GATE: an impactful action (types/opens into the focused
-            # window) that came from the LLM fallback (not a clear regex match)
-            # must be confirmed by the user before it runs. This closes the
-            # hallucinated-tool-call risk (old Phase 6 confirmation layer).
-            if from_fallback and tool_name in self.IMPACTFUL_TOOLS:
+            # SAFETY GATE. Two independent reasons to confirm before running:
+            #   - ALWAYS_GATE_TOOLS (e.g. click_text): impactful via OCR location
+            #     regardless of how it was routed - gate even on a clean regex hit.
+            #   - IMPACTFUL_TOOLS from the LLM fallback: a guessed type/open into
+            #     the focused window - closes the hallucinated-tool-call risk.
+            if tool_name in self.ALWAYS_GATE_TOOLS or (
+                from_fallback and tool_name in self.IMPACTFUL_TOOLS
+            ):
+                gate_reason = (
+                    "always-gate" if tool_name in self.ALWAYS_GATE_TOOLS
+                    else "fallback"
+                )
                 logger.warning(
-                    f"[safety] fallback impactful action needs confirmation: "
-                    f"{tool_name}({tool_args})"
+                    f"[safety] impactful action needs confirmation "
+                    f"({gate_reason}): {tool_name}({tool_args})"
                 )
                 if not self._confirm_action(self._describe_action(tool_name, tool_args)):
                     logger.warning(f"[safety] DENIED (not executed): {tool_name}({tool_args})")
@@ -313,8 +320,16 @@ class DesktopAgent:
         return response
 
     # Impactful actions that must be confirmed when they come from the LLM
-    # fallback rather than a clear, deterministic regex match.
-    IMPACTFUL_TOOLS = {"type_text", "open_app"}
+    # fallback rather than a clear, deterministic regex match. (The orchestrator/
+    # GatedExecutor path confirms EVERY impactful action regardless of source.)
+    IMPACTFUL_TOOLS = {"type_text", "open_app", "click_text"}
+
+    # Tools confirmed UNCONDITIONALLY in the single-shot path - even on a clean
+    # regex match. click_text's risk is OCR MIS-LOCATION, not how it was invoked,
+    # so a deterministic regex match does not make it "trusted" the way a literal
+    # "type hello" is. This is intentionally separate from IMPACTFUL_TOOLS's
+    # from_fallback-only semantics.
+    ALWAYS_GATE_TOOLS = {"click_text"}
 
     @staticmethod
     def _describe_action(tool_name: str, tool_args: dict) -> str:
@@ -325,6 +340,11 @@ class DesktopAgent:
             )
         if tool_name == "open_app":
             return f"The agent wants to OPEN the application: {tool_args.get('app_name', '')}"
+        if tool_name == "click_text":
+            return (
+                "The agent wants to CLICK on-screen text matching: "
+                f"“{tool_args.get('query', '')}”"
+            )
         return f"The agent wants to run {tool_name} with args {tool_args}"
 
     def _confirm_action(self, description: str) -> bool:

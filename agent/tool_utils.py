@@ -86,6 +86,10 @@ def normalize_tool_args(tool_name: str, args: Union[str, Dict, None]) -> Dict[st
             else:
                 return {}  # Unrecognized click arg, use current position
 
+        # Grounded text-click tool - the captured span is the search query
+        elif tool_name == "click_text":
+            return {"query": args} if args else {}
+
         # Screenshot tool
         elif tool_name in ("take_screenshot", "screenshot"):
             return {"filepath": args} if args else {}

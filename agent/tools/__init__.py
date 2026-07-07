@@ -49,11 +49,15 @@ def initialize_tools(vision_analyzer=None):
     Args:
         vision_analyzer: VisionAnalyzer instance for screen tools
     """
-    # Screen tools need VisionAnalyzer
+    # Screen tools and grounded tools both need VisionAnalyzer.
     if vision_analyzer:
         from .screen_tools import register_screen_tools
 
         register_screen_tools(vision_analyzer)
+
+        from .grounded_tools import register_grounded_tools
+
+        register_grounded_tools(vision_analyzer)
 
 
 def get_tool_summary():
