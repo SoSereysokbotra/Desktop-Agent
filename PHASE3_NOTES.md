@@ -24,6 +24,38 @@ safety/confirmation layer (old "Phase 6") was meant to catch. It should be
 folded into Phase 3 rather than deferred, because destructive typing into
 existing user content is a data-loss risk, not just a UX rough edge.
 
+## RISK: `click_text` confirmation shows the QUERY, not the RESOLVED target
+
+**Severity: real risk (not a nice-to-have).** Surfaced during the Phase 3b
+`click_text` implementation. Same category as the `open_app` gap above:
+confirming the wrong thing looks exactly like confirming the right thing.
+
+**Description:**
+The `click_text` safety gate (`ALWAYS_GATE_TOOLS`) confirms the user's original
+QUERY, not the text `find_text()` actually resolved to. The confirmation is
+built by `_describe_action` from `tool_args["query"]` (e.g. `"save"`), but the
+real matched token is only known later, *inside* `ClickText.execute()` after
+`find_text()` runs. Because `find_text()` is fuzzy (substring + difflib), it can
+resolve to something the user did not intend — e.g. query `"Save"` matching a
+`"Save As"` button, or `"file"` matching `"Profile"` — while the dialog still
+says only `'save'`/`'file'`. The user approves their INTENT and unknowingly
+authorizes a click on a DIFFERENT resolved target. The gate gives false
+assurance precisely when the fuzzy match is wrong.
+
+**Needs a two-phase gate:**
+- (a) locate first (`find_text`), THEN build the confirmation from the actual
+  matched token + score/coords (e.g. "Click 'Save As' (matched 'save', score
+  0.71) at (x,y)?"), and only click after approval; or
+- (b) at minimum, tighten matching for gated clicks (higher `min_score`, prefer
+  exact/whole-token matches) and surface the score so a loose match is visible.
+
+**Context:**
+This requires restructuring `ClickText.execute()` so location happens *before*
+the confirmation, or moving the confirm call into the tool — a change to the
+gate/tool boundary, deliberately deferred out of Phase 3b scope. Tracked here so
+it is not silently shelved: the risk is authorizing an unintended click that
+*looks* confirmed.
+
 ## KNOWN ISSUE: floating panel drops behind a maximized/fullscreen window
 
 **Severity: cosmetic / UX (not a safety issue).** Surfaced during Phase A
